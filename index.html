@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Self-Driving Car</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: 'Arial', sans-serif;
+            background: #111;
+        }
+        canvas {
+            display: block;
+        }
+        #info-panel {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            border-radius: 8px;
+            max-width: 300px;
+        }
+        h1 {
+            margin: 0 0 10px 0;
+            font-size: 1.5em;
+        }
+        p {
+            margin: 5px 0;
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/brain.js"></script>
+</head>
+<body>
+    <div id="info-panel">
+        <h1>Self Driving Car</h1>
+        <p><strong>Controls:</strong> Use the <strong>Left/Right Arrow Keys</strong> to steer the car.</p>
+        <p>The car moves forward automatically. The red lines are the car's sensors detecting the road edges.</p>
+        <p>Start Recording, train the AI and start self autonomous driving</p>
+        <p><strong>Update:</strong> The road is now a continuous loop!</p>
+        <button id="start-recording">Start Recording</button>
+        <button id="train-ai">Train AI</button>
+        <button id="start-autonomous">Start Self-Driving</button>
+        <p id="status">Status: Idle</p>
+    </div>
+
+    <!-- Import three.js library -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // --- SCENE SETUP ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87ceeb); // Sky blue background
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        // --- LIGHTING ---
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 1.0);
+        directionalLight.position.set(20, 50, 20);
+        directionalLight.castShadow = true;
+        scene.add(directionalLight);
+
+        // --- WORLD CREATION ---
+        
+        // Ground
+        const groundGeometry = new THREE.PlaneGeometry(500, 500);
+        const groundMaterial = new THREE.MeshStandardMaterial({ color: 0x556b2f }); // Dark olive green
+        const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+        ground.rotation.x = -Math.PI / 2;
+        ground.receiveShadow = true;
+        scene.add(ground);
+
+        // --- EDITED: Road is now a continuous loop ---
+        const roadWidth = 10;
+        const roadSegments = 200;
+        const curvePoints = [];
+        const radiusX = 80;
+        const radiusZ = 120;
+
+        for (let i = 0; i <= roadSegments; i++) {
+            const angle = (i / roadSegments) * Math.PI * 2;
+            const x = Math.cos(angle) * radiusX;
+            const z = Math.sin(angle) * radiusZ;
+            // Add some height variation to make it more interesting
+            const y = Math.sin(angle * 3) * 2 + 0.1;
+            curvePoints.push(new THREE.Vector3(x, y, z));
+        }
+        
+        const roadCurve = new THREE.CatmullRomCurve3(curvePoints);
+        roadCurve.closed = true; // Make the curve a closed loop
+        roadCurve.curveType = 'catmullrom';
+
+        const roadGeometry = new THREE.TubeGeometry(roadCurve, roadSegments, roadWidth, 16, true);
+        const roadMaterial = new THREE.MeshStandardMaterial({ color: 0x444444 });
+        const road = new THREE.Mesh(roadGeometry, roadMaterial);
+        road.receiveShadow = true;
+        road.position.y = -5;  // Lower the road a bit
+        scene.add(road);
+
+        // --- CAR SETUP ---
+        const car = new THREE.Group();
+        const carBody = new THREE.Mesh(
+            new THREE.BoxGeometry(2, 1, 4),
+            new THREE.MeshStandardMaterial({ color: 0xff0000 }) // Red car
+        );
+        carBody.castShadow = true;
+        car.add(carBody);
+        scene.add(car);
+        
+        // --- FIX: Set car's initial position above the road surface ---
+        car.position.set(0, 5, 120);  // Y = 5 to place the car visibly above the road
+        car.rotation.y = Math.PI / 2;
+
+        // Car properties
+        let carSpeed = 0.5;
+        let steeringAngle = 0;
+        const maxSteer = Math.PI / 6; // 30 degrees
+
+        // --- CAR SENSORS ---
+        const sensorLength = 15;
+        const sensorDirections = [
+            new THREE.Vector3(0, 0, 1),          // Forward
+            new THREE.Vector3(0.5, 0, 1),       // Forward-right
+            new THREE.Vector3(-0.5, 0, 1),      // Forward-left
+            new THREE.Vector3(1, 0, 0),         // Right
+            new THREE.Vector3(-1, 0, 0),        // Left
+        ];
+        const raycasters = sensorDirections.map(() => new THREE.Raycaster());
+        const sensorLines = new THREE.Group();
+        car.add(sensorLines);
+
+        // Initialize sensor lines
+        sensorDirections.forEach(dir => {
+            const material = new THREE.LineBasicMaterial({ color: 0xff0000 });
+            const geometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0.5, 0), dir.clone().multiplyScalar(sensorLength).add(new THREE.Vector3(0, 0.5, 0))]);
+            const line = new THREE.Line(geometry, material);
+            sensorLines.add(line);
+        });
+
+        // --- CONTROLS ---
+        const keys = {
+            ArrowLeft: false,
+            ArrowRight: false
+        };
+
+        window.addEventListener('keydown', (e) => {
+            if (keys.hasOwnProperty(e.key)) {
+                keys[e.key] = true;
+            }
+        });
+
+        window.addEventListener('keyup', (e) => {
+            if (keys.hasOwnProperty(e.key)) {
+                keys[e.key] = false;
+            }
+        });
+
+        // --- CAMERA ---
+        const cameraOffset = new THREE.Vector3(0, 15, -25);
+
+        let isRecording = false;
+        let trainingData = [];
+        let net = null;
+        let isTrained = false;
+        let isAutonomous = false;
+
+        
+
+        // --- ANIMATION LOOP ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // Update steering based on key presses
+            if (keys.ArrowLeft) {
+                steeringAngle = Math.min(steeringAngle + 0.05, maxSteer);
+            } else if (keys.ArrowRight) {
+                steeringAngle = Math.max(steeringAngle - 0.05, -maxSteer);
+            } else {
+                // Return to center
+                steeringAngle *= 0.95;
+            }
+
+            // Update car rotation and position
+            car.rotation.y += steeringAngle * 0.05;
+            // Move car in XZ plane
+            car.position.x += carSpeed * Math.sin(car.rotation.y);
+            car.position.z += carSpeed * Math.cos(car.rotation.y);
+
+            // Adjust Y to stay on road
+            const downRaycaster = new THREE.Raycaster();
+            const downOrigin = car.position.clone();
+            downOrigin.y += 10; // Start above the car
+            downRaycaster.set(downOrigin, new THREE.Vector3(0, -1, 0)); // Cast downward
+            const downIntersects = downRaycaster.intersectObject(road);
+
+            if (downIntersects.length > 0) {
+                car.position.y = downIntersects[0].point.y + 0.5; // Slight offset to sit on top
+            } else {
+                car.position.y = 5; // Fallback height if nothing is hit
+            }
+
+
+            // Update camera to follow the car
+            const cameraTarget = car.position.clone();
+            const cameraPosition = car.localToWorld(cameraOffset.clone());
+            camera.position.lerp(cameraPosition, 0.1);
+            camera.lookAt(cameraTarget);
+
+            // Update sensors
+            const carWorldPosition = new THREE.Vector3();
+            car.getWorldPosition(carWorldPosition);
+            carWorldPosition.y += 0.5; // Raise sensors to car's height
+
+            const objectsToIntersect = [road]; // Can add other obstacles later
+            
+            raycasters.forEach((raycaster, i) => {
+                const direction = sensorDirections[i].clone().applyEuler(car.rotation);
+                raycaster.set(carWorldPosition, direction);
+                const intersects = raycaster.intersectObjects(objectsToIntersect);
+
+                const line = sensorLines.children[i];
+                if (intersects.length > 0) {
+                    // Sensor detected something
+                    line.material.color.set(0x00ff00); // Green
+                    const distance = intersects[0].distance;
+                    // Shorten the line to the intersection point
+                    line.geometry.setFromPoints([new THREE.Vector3(0, 0.5, 0), direction.clone().multiplyScalar(distance).add(new THREE.Vector3(0, 0.5, 0))]);
+                } else {
+                    // No detection
+                    line.material.color.set(0xff0000); // Red
+                    // Reset line to full length
+                    line.geometry.setFromPoints([new THREE.Vector3(0, 0.5, 0), sensorDirections[i].clone().multiplyScalar(sensorLength).add(new THREE.Vector3(0, 0.5, 0))]);
+                }
+            });
+
+            renderer.render(scene, camera);
+
+            // Collect training data during manual driving
+            if (isRecording && !isTrained) {
+                const sensorReadings = raycasters.map((raycaster, i) => {
+                    const direction = sensorDirections[i].clone().applyEuler(car.rotation);
+                    const result = raycaster.intersectObject(road);
+                    return result.length > 0 ? result[0].distance : sensorLength;
+                });
+
+                trainingData.push({
+                    input: sensorReadings,
+                    output: steeringAngle
+                });
+
+                if (trainingData.length % 30 === 0) {
+                    console.log(`Collected ${trainingData.length} samples`);
+                }
+            }
+
+            if (isAutonomous && isTrained) {
+            const sensorReadings = raycasters.map((raycaster, i) => {
+                const direction = sensorDirections[i].clone().applyEuler(car.rotation);
+                const result = raycaster.intersectObject(road);
+                return result.length > 0 ? result[0].distance / sensorLength : 1;
+            });
+
+            const output = net.run(sensorReadings);
+            steeringAngle = output[0] * (Math.PI / 6); // De-normalize
+        }
+
+        }
+
+        // Handle window resizing
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+
+        // Start recording button
+        document.getElementById("start-recording").onclick = () => {
+            isRecording = !isRecording;
+            document.getElementById("status").textContent = isRecording
+                ? "Status: Recording..."
+                : "Status: Idle";
+        };
+
+        // Train AI button
+        document.getElementById("train-ai").onclick = () => {
+            if (trainingData.length < 20) {
+                alert("Not enough training data.");
+                return;
+            }
+
+            document.getElementById("status").textContent = "Status: Training...";
+
+            net = new brain.NeuralNetwork({
+                hiddenLayers: [10]
+            });
+
+            // Normalize inputs and outputs
+            const normalizedData = trainingData.map(({ input, output }) => ({
+                input: input.map(x => x / 15), // Sensor range normalization
+                output: [output / (Math.PI / 6)] // Steering normalization
+            }));
+
+            net.train(normalizedData, {
+                iterations: 200,
+                log: true,
+                logPeriod: 10,
+                learningRate: 0.01
+            });
+
+            isTrained = true;
+            document.getElementById("status").textContent = "Status: Trained ✅";
+
+
+        };
+
+        document.getElementById("start-autonomous").onclick = () => {
+            if (!isTrained) {
+                alert("Please train the AI first.");
+                return;
+            }
+            isRecording = false;
+            isAutonomous = true;
+            document.getElementById("status").textContent = "Status: Self-Driving 🤖";
+        };
+
+    </script>
+</body>
+</html>
+
